@@ -1,0 +1,410 @@
+terraform init - Initializes Terraform and connects to our service provider
+terraform validate - Check if requested configs are valid
+terraform plan - Gives you information about current state of the system and variance from Desired state
+terraform apply - Instances created succesully
+terraform destroy - Destroy the instance (Provisioned Resources) 
+terraform graph - generate a visual representation of either a configuration or execution plan. The output is in the DOT format, which can be used by GraphViz to generate charts
+Terraform fmt– it is used to rewrite configuration files in a canonical styles and format
+
+---------------------------------------------------------------------------------------------------------------
+AWS
+---------------------------------------------------------------------------------------------------------------
+provider "aws" {
+  region = "eu-west-2"
+}
+
+resource "aws_instance" "dbserver" {
+  ami = "ami-03ac5a9b225e99b02"
+  instance_type = "t2.micro"
+  tags = {
+    "Name" = "DBServer"
+  }
+
+}
+
+resource "aws_instance" "webserver" {
+  ami = "ami-03ac5a9b225e99b02"
+  instance_type = "t2.micro"
+  security_groups = [aws_security_group.sg.name]
+  user_data = file("server_script.sh")
+  tags = {
+    "Name" = "WebServer"
+  }
+}
+
+
+resource "aws_eip" "EIP" {
+    instance = aws_instance.webserver.id
+}
+
+output "EIP" {
+    value = aws_eip.EIP.public_ip
+}
+
+output "PIP" {
+    value = aws_instance.dbserver.private_ip      
+}
+
+
+variable "ingressrules" {
+  type = list(string)
+  default = [ 443,80 ]
+}
+
+variable "egressrules" {
+  type = list(string)
+  default = [ 443,80 ]
+}
+
+
+
+
+resource "aws_security_group" "sg" {
+  name = "ALLOW HTTPHTTPS"
+
+    dynamic "ingress"  {
+      iterator = port
+      for_each = var.ingressrules
+      content{
+      cidr_blocks = [ "0.0.0.0/0" ]
+      description = "value"
+      from_port = port.value
+      ipv6_cidr_blocks = [ "0.0.0.0/0" ]
+      protocol = "TCP"
+      to_port = port.value
+    } 
+    }
+
+    dynamic "egress" {
+      iterator = port
+      for_each = var.egressrules
+      content{
+      cidr_blocks = [ "0.0.0.0/0" ]
+      description = "value"
+      from_port = port.value
+      ipv6_cidr_blocks = [ "0.0.0.0/0" ]
+      protocol = "TCP"
+      to_port = port.value
+    } 
+    }
+}
+
+----------------------------------------------
+module ---- Reusability,Modularization
+-----------------------------------------------
+provider "google" {
+  credentials = file("account.json")
+  project     = var.project
+  region      = var.region
+  version     = "~> 3.45.0"
+}
+
+module "VM Config" {
+  source="/home/osboxes/demo11/modules/vm"
+  instance_type="n1-standard"
+   
+}
+
+
+main.tf-----------------------------------------
+
+data "template_file" "default" {
+  template = file("scripts/install.sh")
+}
+
+resource "google_compute_firewall" "default" {
+  name    = "nginx-firewall"
+  network = "default"
+
+  allow {
+    protocol = "tcp"
+    ports    = ["80"]
+  }
+
+  source_ranges = ["0.0.0.0/0"]
+  target_tags   = ["nginx"]
+}
+
+resource "google_compute_instance" "default" {
+  name         = "nginx"
+  machine_type = "n1-standard-1"
+  zone         = "us-central1-a"
+
+  tags = ["nginx"]
+
+  boot_disk {
+    initialize_params {
+      image = "ubuntu-1804-lts"
+    }`
+  }
+  
+  network_interface {
+    network = "default"
+
+    access_config {
+    }
+  }
+
+  metadata_startup_script = data.template_file.default.rendered
+
+  service_account {
+    scopes = ["logging-write"]
+  }
+}
+
+resource "google_bigquery_dataset" "default" {
+  dataset_id  = "nginx_logs"
+  description = "NGINX Access Logs"
+  location    = "US"
+}
+
+resource "google_logging_project_sink" "default" {
+  name                   = "nginx-logs"
+  destination            = "bigquery.googleapis.com/projects/${var.project}/datasets/${google_bigquery_dataset.default.dataset_id}"
+  filter                 = "resource.type = gce_instance AND logName = projects/${var.project}/logs/nginx-access"
+  unique_writer_identity = true (Create Service Account)
+}
+
+-------------------------------------------------------------------------------------------
+
+variables.tf
+
+variable "project_id" {
+	default="PROJECT_ID"
+	type=string
+	description=""
+}
+
+variable "region" {
+	default="us-central1"
+	type=string
+	description=""
+}
+
+variable "zone" {
+	default="us-central1-a"
+	type=string
+	description=""
+}
+
+
+---------------------------------------------------------------------------------------------
+Module outputs are usually either passed to other parts of your configuration or defined as outputs in your root module. You will see both uses in this lab.
+
+
+output.tf
+
+output "network_name" {
+  value       = module.test-vpc-module.network_name
+  description = "The name of the VPC being created"
+}
+
+output "network_self_link" {
+  value       = module.test-vpc-module.network_self_link
+  description = "The URI of the VPC being created"
+}
+
+output "project_id" {
+  value       = module.test-vpc-module.project_id
+  description = "VPC project id"
+}
+
+---------------------------------------------------------------------------------------------
+
+Cloud Formation Template for EC2 instance
+
+ MyEC2Instance: 
+    Type: AWS::EC2::Instance
+    Properties: 
+      ImageId: "ami-79fd7eee"
+      KeyName: "testkey"
+      BlockDeviceMappings: 
+      - DeviceName: "/dev/sdm"
+        Ebs: 
+          VolumeType: "io1"
+          Iops: "200"
+          DeleteOnTermination: "false"
+          VolumeSize: "20"
+      - DeviceName: "/dev/sdk"
+        NoDevice: {}
+		
+
+Cloud Formation template for S3 Bucket
+
+AWSTemplateFormatVersion: 2010-09-09
+Resources:
+  S3Bucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      AccessControl: Private
+      LifecycleConfiguration:
+        Rules:
+          - Id: GlacierRule
+            Prefix: glacier
+            Status: Enabled
+            ExpirationInDays: 365
+            Transitions:
+              - TransitionInDays: 1
+                StorageClass: GLACIER
+Outputs:
+  BucketName:
+    Value: !Ref S3Bucket
+    Description: Name of the sample Amazon S3 bucket with a lifecycle configuration.
+	
+------------------------------------------------------------------------------------------------------------
+
+ 7: Define null resource in Terraform?
+The null resource implements the average resource lifecycle but takes no extra action.You can implement null resource in trigger arguments, for example:
+
+resource “null_resource” “demo” {
+triggers = {
+cluster_instance_ids = join(“,”, aws_instance.cluster.*.id)
+}
+
+The primary use-case for the null resource is as a do-nothing container for arbitrary actions taken by a provisioner.
+
+1: How would you recover from a failed apply in Terraform?
+Put the current module in version control and revert to an older module/config if required.
+
+4. What is Terragrunt, and what are its uses?
+Terragrunt is a thin wrapper that provides extra tools to keep configurations DRY(dont repeat yourself), manage remote state and work with multiple Terraform modules. It is used for:
+
+-1. By using Terragrunt, you write your codes on Terraform only once, even if you have multiple environments. You do not write configuration codes for every environment. 
+-2. It helps you get rid of duplicate code in the backend. 
+-3. Using Terragrunt, you can manage the terraform state once by defining it in the root directory and all the child modules can inherit it
+
+
+23. What is a Remote Backend in Terraform?
+The remote backend in terraform is used to store the state of terraform and can also run operations in terraform cloud. Remote backend multiple terraform commands such as init, plan, apply, destroy (terraform version >= v0.11.12), get, output, providers, state (sub-commands: list, mv, pull, push, rm, show) , taint, untaint, validate and many more.
+
+
+6: What is a Tainted Resource?
+Tainted resources are those resources that are forced to be destroyed and recreated on the next apply command. When you mark a resource as tainted, nothing changes on infrastructure but the state file is updated with this information(destroy and create).
+
+7. Are callbacks possible with Terraform on Azure?
+By using the Azure Event Hubs, callbacks are probable on Azure. Terraform’s Azure supplier provides effortless functionality to users.
+
+8. Multiple provider config
+# The default provider configuration
+provider "google" {
+  region = "us-west-1"
+}
+
+# Additional provider configuration
+provider "aws" {
+  alias = "east"
+  region = "us-east-2"
+}
+
+4. How is duplicate resource error ignored during terraform apply?
+We can try the following options:
+Delete those resources from the cloud provider(API) and recreate them using Terraform
+Delete those resources from Terraform code to stop its management with it
+Carry out a terraform import of the resource and remove the code that is trying to recreate them
+
+10. Define Resource Graph in Terraform.
+A resource graph is a visual representation of the resources. It helps modify and create independent resources simultaneously. 
+
+
+5. What is Terraform Core? Tell us some primary responsibilities of it.
+Terraform Core is a binary written statically compiled by using the Go programming language. 
+Terraform core is the entry point of the whole terraform architecture. It is responsible for reading all the configurations and create a dependency graph out of it. Once the terraform plan command is executed, the terraform core loads all the needed configuration files from the disk and also the last known state of the resources. It then begins a refresh operation and tells the terraform provider plugin to read all the resources. After the read operation, the terraform core checks if there is any difference in the last known state and current state. It then presents the changes in the output of terraform plan on the terminal.
+
+a. Resource Graph Construction
+b. Plugin communication through RPC
+c. Plan execution
+d. Management of resource state
+
+7. How will you upgrade plugins on Terraform?
+Run ‘terraform init’ with ‘-upgrade’ option
+
+8. How will you make an object of one module available for the other module at a high level?
+Output variable is defined in resource configuration.
+Declare the output variable of module_A.
+Create a file variable.tf for module B.
+
+5) What does HCL stand for?
+In Terraform HCL stands for HashiCorp Configuration Language.
+
+6) Explain the architecture of terraform?
+The architecture of terraform consists of following components:
+
+State Manager
+Graph Builder
+Expression Evaluation
+Sub-graphs
+CLI (Command Line interface)
+Backends for executing operations,storing state, and storing workspace-defined variables
+Configuration Loader
+
+11) For what provisioners are used in Terraform?
+Provisioners are used to execute scripts on a local or remote machine as part of resource creation or destruction. Provisioners can be used to bootstrap a resource, cleanup before destroy, run configuration management, etc.
+
+12) Enlist some Built-in Provisioners available in Terraform?
+Below is the list of some Built-in provisioners in Terraform:
+
+Remote-exec Provisioner
+Chef Provisioner
+File Provisioner
+Local-exec Provisioner
+Puppet Provisioner
+
+21 : What do we need to use a remote-exec?
+When you wish to execute some commands on Terraform created resources remotely, you can use remote-exec provisioner
+
+provider "aws" {
+   profile = "default"
+   region = "us-east-1"
+ }
+resource "aws_instance" "demo" {
+   ami = "ami-04590e7389a6e577c"
+   instance_type = "t2.micro"
+connection { 
+type = "ssh"  
+host = aws_instance.example_public.public_ip   
+user = var.ssh_user   
+port = var.ssh_port
+agent = true
+ 
+}
+provisioner "remote-exec" {
+     inline = [
+       "sudo amazon-linux-extras enable nginx1.12",
+       "sudo yum -y install nginx",
+       "sudo systemctl start nginx"
+     ]
+   }
+ }
+
+24 : What is the command import?
+The import command in terraform imports the existing resources into terraform.
+
+Syntax: terraform import [options] ADDRESS ID
+terraform import aws_instance.demo i-efgh5678
+
+25 : If terraform crashes, where should you see the logs?
+If terraform crashes, all the debug logs from the session get stored in the crash.log file with a panic message.
+
+/opt/go/src/runtime/panic.go:464 +0x3e6
+ 
+panic: runtime error: invalid memory address or nil pointer dereference
+goroutine 567 [running]:
+panic(0xabc100, 0xd93000a0a0)
+
+26 : How do you remove items from the Terraform state?
+We can use the state rm command to remove items from the terraform state. This command is used to remove the binding to an existing remote object without destroying it. 
+-> terraform state rm ‘packet_device.demo’
+
+27 : How do you move the state from one source to another?
+terraform state mv command is used to move the current state of a module, resource, or instance
+
+->  terraform state mv [options] SOURCE DESTINATION
+
+49. Tell about a few Terraform best practices.
+Follow a proper directory structure of the terraform workspace. The projects on production can get very complex if they are not well-structured.
+Use naming conventions to make the cluster structure understandable.
+Always use the latest stable terraform version, they have new features and a lot of security patches.
+You official terraform modules, don’t waste time in creating similar modules that are already available in the terraform registry.
+Always backup the terraform state files.
+Use official terraform docker containers in your CICD pipeline jobs.
+Lock the state files to avoid any conflict between teams or team members.
